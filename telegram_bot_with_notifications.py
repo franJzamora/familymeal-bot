@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(
+    SUPABASE_URL or "", 
+    SUPABASE_KEY or ""
+)
 
 # Estados (mismos que antes)
 (REGISTER_EMAIL, REGISTER_PASSWORD, CREATE_OR_JOIN, 
