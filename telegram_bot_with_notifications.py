@@ -1,6 +1,6 @@
 """
 FamilyMeal Bot - VERSIÓN COMPLETA
-Con inventario, recetas, menú semanal, lista de compra y notificaciones
+Con inventario, recetas (COMPLETO), menú semanal, lista de compra y notificaciones
 """
 
 import os
@@ -29,8 +29,9 @@ supabase: Client = create_client(SUPABASE_URL or "", SUPABASE_KEY or "")
 # Estados de conversación
 (CREATE_FAMILY_NAME, JOIN_FAMILY_CODE,
  ADD_INVENTORY_SECTION, ADD_INVENTORY_NAME, ADD_INVENTORY_STOCK,
- CREATE_RECIPE_NAME, ADD_RECIPE_INGREDIENT,
- SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_RECIPE, SET_DEFROST_TIME) = range(11)
+ CREATE_RECIPE_NAME, SELECT_INGREDIENT_SECTION, SELECT_INGREDIENT_PRODUCT, 
+ ADD_INGREDIENT_QUANTITY, SET_DEFROST_TIME,
+ SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_RECIPE) = range(13)
 
 DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 MEALS = ['Comida', 'Cena']
@@ -296,7 +297,6 @@ class FamilyMealBot:
             stock = int(update.message.text.strip())
             context.user_data['inv_stock'] = stock
             
-            # Guardar directamente (sin preguntar hora)
             await self.save_inventory_item(update, context)
             return ConversationHandler.END
                 
@@ -318,7 +318,7 @@ class FamilyMealBot:
                 "family_id": family['id'],
                 "section": context.user_data['inv_section'],
                 "name": context.user_data['inv_name'],
-                "quantity": str(context.user_data['inv_stock']),  # Por compatibilidad
+                "quantity": str(context.user_data['inv_stock']),
                 "stock": context.user_data['inv_stock'],
                 "created_at": datetime.now().isoformat()
             }
@@ -378,7 +378,6 @@ class FamilyMealBot:
         item_id = query.data.replace("buy_", "")
         
         try:
-            # Obtener item actual
             item = supabase.table("inventory").select("*").eq("id", item_id).execute()
             if not item.data:
                 await query.edit_message_text("❌ Producto no encontrado")
@@ -386,7 +385,6 @@ class FamilyMealBot:
             
             current_item = item.data[0]
             
-            # Incrementar stock
             supabase.table("inventory")\
                 .update({"stock": 1})\
                 .eq("id", item_id)\
@@ -397,16 +395,306 @@ class FamilyMealBot:
             logger.error(f"Error: {e}")
             await query.edit_message_text(f"❌ Error: {e}")
     
-    # ========== RECETAS (simplificado) ==========
+    # ========== RECETAS ==========
     
     async def show_recipes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Mostrar recetas"""
+        """Mostrar recetas de la familia"""
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        if not family:
+            await update.message.reply_text("❌ No perteneces a ninguna familia")
+            return
+        
+        recipes = supabase.table("recipes")\
+            .select("*")\
+            .eq("family_id", family['id'])\
+            .execute()
+        
+        if not recipes.data:
+            text = "📖 *Recetas*\n\n_Aún no hay recetas._\n\n¡Crea la primera!"
+        else:
+            text = "📖 *Recetas de la familia*\n\n"
+            for recipe in recipes.data:
+                icon = "🧊" if recipe.get('needs_defrost') else "✅"
+                text += f"{icon} {recipe['name']}\n"
+        
+        keyboard = [[InlineKeyboardButton("➕ Crear receta", callback_data="create_recipe")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def create_recipe_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Iniciar creación de receta"""
+        query = update.callback_query
+        await query.answer()
+        
+        # Limpiar datos previos
+        context.user_data['recipe_ingredients'] = []
+        context.user_data['recipe_needs_defrost'] = False
+        
+        await query.edit_message_text("📖 *Nueva receta*\n\n¿Nombre de la receta?", parse_mode='Markdown')
+        return CREATE_RECIPE_NAME
+    
+    async def create_recipe_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Capturar nombre de receta y empezar con ingredientes"""
+        recipe_name = update.message.text.strip()
+        context.user_data['recipe_name'] = recipe_name
+        
+        await self.ask_ingredient_section(update, context)
+        return SELECT_INGREDIENT_SECTION
+    
+    async def ask_ingredient_section(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Preguntar de qué sección es el ingrediente"""
+        keyboard = [
+            [InlineKeyboardButton("🧊 Congelador", callback_data="ing_sect_Congelador")],
+            [InlineKeyboardButton("❄️ Frigo", callback_data="ing_sect_Frigo")],
+            [InlineKeyboardButton("📦 Despensa", callback_data="ing_sect_Despensa")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            "📖 *Recetas*\n\n🚧 Próximamente podrás crear recetas con ingredientes.",
+            f"➕ *Añadir ingrediente*\n\n¿De dónde?",
+            reply_markup=reply_markup,
             parse_mode='Markdown'
         )
     
-    # ========== MENÚ SEMANAL (simplificado) ==========
+    async def select_ingredient_section(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Seleccionar sección y mostrar productos"""
+        query = update.callback_query
+        await query.answer()
+        
+        section = query.data.replace("ing_sect_", "")
+        context.user_data['current_ing_section'] = section
+        
+        # Si es congelador, marcar que la receta necesita descongelar
+        if section == "Congelador":
+            context.user_data['recipe_needs_defrost'] = True
+        
+        # Obtener productos de esa sección
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        products = supabase.table("inventory")\
+            .select("*")\
+            .eq("family_id", family['id'])\
+            .eq("section", section)\
+            .gt("stock", 0)\
+            .execute()
+        
+        if not products.data:
+            await query.edit_message_text(
+                f"❌ No hay productos en *{section}*\n\n"
+                f"Añade productos al inventario primero.",
+                parse_mode='Markdown'
+            )
+            return ConversationHandler.END
+        
+        keyboard = []
+        for product in products.data:
+            keyboard.append([InlineKeyboardButton(
+                f"{product['name']} (stock: {product['stock']})",
+                callback_data=f"ing_prod_{product['id']}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        icon = "🧊" if section == "Congelador" else "❄️" if section == "Frigo" else "📦"
+        await query.edit_message_text(
+            f"{icon} *{section}*\n\nSelecciona producto:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return SELECT_INGREDIENT_PRODUCT
+    
+    async def select_ingredient_product(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Producto seleccionado, preguntar cantidad"""
+        query = update.callback_query
+        await query.answer()
+        
+        product_id = query.data.replace("ing_prod_", "")
+        
+        # Obtener datos del producto
+        product = supabase.table("inventory").select("*").eq("id", product_id).execute()
+        if not product.data:
+            await query.edit_message_text("❌ Producto no encontrado")
+            return ConversationHandler.END
+        
+        context.user_data['current_ingredient'] = product.data[0]
+        
+        await query.edit_message_text(
+            f"📊 *{product.data[0]['name']}*\n\n¿Cuántas unidades?",
+            parse_mode='Markdown'
+        )
+        return ADD_INGREDIENT_QUANTITY
+    
+    async def add_ingredient_quantity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Guardar cantidad y preguntar si añadir más ingredientes"""
+        try:
+            quantity = int(update.message.text.strip())
+            
+            ingredient_data = {
+                'product_id': context.user_data['current_ingredient']['id'],
+                'name': context.user_data['current_ingredient']['name'],
+                'section': context.user_data['current_ingredient']['section'],
+                'quantity': quantity
+            }
+            
+            context.user_data['recipe_ingredients'].append(ingredient_data)
+            
+            # Mostrar ingredientes actuales
+            ingredients_text = "\n".join([
+                f"• {ing['name']} ({ing['quantity']} ud) - {ing['section']}"
+                for ing in context.user_data['recipe_ingredients']
+            ])
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Otro ingrediente", callback_data="add_another_ing")],
+                [InlineKeyboardButton("✅ Terminar receta", callback_data="finish_recipe")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"✅ *Ingrediente añadido*\n\n"
+                f"Receta: *{context.user_data['recipe_name']}*\n\n"
+                f"Ingredientes:\n{ingredients_text}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return SELECT_INGREDIENT_SECTION
+            
+        except ValueError:
+            await update.message.reply_text("❌ Debe ser un número. Intenta de nuevo:")
+            return ADD_INGREDIENT_QUANTITY
+    
+    async def add_another_ingredient(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Añadir otro ingrediente"""
+        query = update.callback_query
+        await query.answer()
+        
+        keyboard = [
+            [InlineKeyboardButton("🧊 Congelador", callback_data="ing_sect_Congelador")],
+            [InlineKeyboardButton("❄️ Frigo", callback_data="ing_sect_Frigo")],
+            [InlineKeyboardButton("📦 Despensa", callback_data="ing_sect_Despensa")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"➕ *Añadir ingrediente*\n\n¿De dónde?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return SELECT_INGREDIENT_SECTION
+    
+    async def finish_recipe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Finalizar receta y preguntar hora si necesita descongelar"""
+        query = update.callback_query
+        await query.answer()
+        
+        needs_defrost = context.user_data.get('recipe_needs_defrost', False)
+        
+        if needs_defrost:
+            await query.edit_message_text(
+                "🧊 *Esta receta necesita descongelar*\n\n"
+                "¿A qué hora quieres el recordatorio?\n"
+                "(Formato: HH:MM, ej: 22:00)",
+                parse_mode='Markdown'
+            )
+            return SET_DEFROST_TIME
+        else:
+            await self.save_recipe(update, context, query, "22:00")
+            return ConversationHandler.END
+    
+    async def set_defrost_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Capturar hora de recordatorio y guardar receta"""
+        reminder_time = update.message.text.strip()
+        
+        # Validar formato HH:MM
+        try:
+            time_parts = reminder_time.split(":")
+            if len(time_parts) != 2:
+                raise ValueError
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
+            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                raise ValueError
+        except:
+            await update.message.reply_text("❌ Formato incorrecto. Usa HH:MM (ej: 22:00):")
+            return SET_DEFROST_TIME
+        
+        await self.save_recipe(update, context, None, reminder_time)
+        return ConversationHandler.END
+    
+    async def save_recipe(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query, reminder_time: str):
+        """Guardar receta e ingredientes en la BD"""
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        try:
+            # Crear receta
+            recipe_data = {
+                "family_id": family['id'],
+                "name": context.user_data['recipe_name'],
+                "created_by": user['id'],
+                "needs_defrost": context.user_data.get('recipe_needs_defrost', False),
+                "defrost_reminder_time": reminder_time if context.user_data.get('recipe_needs_defrost', False) else None,
+                "created_at": datetime.now().isoformat()
+            }
+            
+            recipe_response = supabase.table("recipes").insert(recipe_data).execute()
+            recipe_id = recipe_response.data[0]['id']
+            
+            # Añadir ingredientes
+            for ingredient in context.user_data['recipe_ingredients']:
+                ingredient_data = {
+                    "recipe_id": recipe_id,
+                    "ingredient_name": ingredient['name'],
+                    "quantity": str(ingredient['quantity']),
+                    "created_at": datetime.now().isoformat()
+                }
+                supabase.table("recipe_ingredients").insert(ingredient_data).execute()
+            
+            # Mostrar resumen
+            ingredients_text = "\n".join([
+                f"• {ing['name']} ({ing['quantity']} ud)"
+                for ing in context.user_data['recipe_ingredients']
+            ])
+            
+            defrost_info = f"\n\n🧊 Recordatorio: {reminder_time}" if context.user_data.get('recipe_needs_defrost', False) else ""
+            
+            message = (
+                f"✅ *Receta creada*\n\n"
+                f"📖 {context.user_data['recipe_name']}\n\n"
+                f"Ingredientes:\n{ingredients_text}"
+                f"{defrost_info}"
+            )
+            
+            if query:
+                await query.edit_message_text(message, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(message, parse_mode='Markdown')
+                
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            error_msg = f"❌ Error al guardar receta: {e}"
+            if query:
+                await query.edit_message_text(error_msg)
+            else:
+                await update.message.reply_text(error_msg)
+    
+    # ========== MENÚ SEMANAL (placeholder) ==========
     
     async def show_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Mostrar menú semanal"""
@@ -513,6 +801,25 @@ def main():
     )
     application.add_handler(inventory_conv)
     
+    # Crear receta
+    recipe_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(bot.create_recipe_start, pattern="^create_recipe$")],
+        states={
+            CREATE_RECIPE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.create_recipe_name)],
+            SELECT_INGREDIENT_SECTION: [
+                CallbackQueryHandler(bot.select_ingredient_section, pattern="^ing_sect_"),
+                CallbackQueryHandler(bot.add_another_ingredient, pattern="^add_another_ing$"),
+                CallbackQueryHandler(bot.finish_recipe, pattern="^finish_recipe$")
+            ],
+            SELECT_INGREDIENT_PRODUCT: [CallbackQueryHandler(bot.select_ingredient_product, pattern="^ing_prod_")],
+            ADD_INGREDIENT_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.add_ingredient_quantity)],
+            SET_DEFROST_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.set_defrost_time)]
+        },
+        fallbacks=[CommandHandler("cancel", bot.cancel)],
+        allow_reentry=True
+    )
+    application.add_handler(recipe_conv)
+    
     # Marcar como comprado
     application.add_handler(CallbackQueryHandler(bot.mark_as_bought, pattern="^buy_"))
     
@@ -522,7 +829,7 @@ def main():
         bot.menu_button_handler
     ))
     
-    logger.info("🤖 Bot iniciado")
+    logger.info("🤖 Bot iniciado con recetas completas")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
