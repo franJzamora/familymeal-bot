@@ -28,9 +28,9 @@ supabase: Client = create_client(SUPABASE_URL or "", SUPABASE_KEY or "")
 
 # Estados de conversación
 (CREATE_FAMILY_NAME, JOIN_FAMILY_CODE,
- ADD_INVENTORY_SECTION, ADD_INVENTORY_NAME, ADD_INVENTORY_STOCK, ADD_INVENTORY_REMINDER,
+ ADD_INVENTORY_SECTION, ADD_INVENTORY_NAME, ADD_INVENTORY_STOCK,
  CREATE_RECIPE_NAME, ADD_RECIPE_INGREDIENT,
- SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_RECIPE, SET_DEFROST_TIME) = range(12)
+ SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_RECIPE, SET_DEFROST_TIME) = range(11)
 
 DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 MEALS = ['Comida', 'Cena']
@@ -291,50 +291,20 @@ class FamilyMealBot:
         return ADD_INVENTORY_STOCK
     
     async def add_inventory_stock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Capturar stock y preguntar hora si es congelador"""
+        """Capturar stock y guardar producto"""
         try:
             stock = int(update.message.text.strip())
             context.user_data['inv_stock'] = stock
             
-            section = context.user_data['inv_section']
-            
-            if section == "Congelador":
-                await update.message.reply_text(
-                    "⏰ ¿A qué hora quieres recordatorio?\n\n"
-                    "Formato: HH:MM (ej: 22:00)\n"
-                    "Por defecto: 22:00"
-                )
-                return ADD_INVENTORY_REMINDER
-            else:
-                # No necesita recordatorio, guardar directamente
-                await self.save_inventory_item(update, context, "22:00")
-                return ConversationHandler.END
+            # Guardar directamente (sin preguntar hora)
+            await self.save_inventory_item(update, context)
+            return ConversationHandler.END
                 
         except ValueError:
             await update.message.reply_text("❌ Debe ser un número. Intenta de nuevo:")
             return ADD_INVENTORY_STOCK
     
-    async def add_inventory_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Capturar hora de recordatorio"""
-        reminder_time = update.message.text.strip()
-        
-        # Validar formato HH:MM
-        try:
-            time_parts = reminder_time.split(":")
-            if len(time_parts) != 2:
-                raise ValueError
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
-            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-                raise ValueError
-        except:
-            await update.message.reply_text("❌ Formato incorrecto. Usa HH:MM (ej: 22:00):")
-            return ADD_INVENTORY_REMINDER
-        
-        await self.save_inventory_item(update, context, reminder_time)
-        return ConversationHandler.END
-    
-    async def save_inventory_item(self, update: Update, context: ContextTypes.DEFAULT_TYPE, reminder_time: str):
+    async def save_inventory_item(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Guardar producto en inventario"""
         telegram_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
@@ -350,7 +320,6 @@ class FamilyMealBot:
                 "name": context.user_data['inv_name'],
                 "quantity": str(context.user_data['inv_stock']),  # Por compatibilidad
                 "stock": context.user_data['inv_stock'],
-                "reminder_time": reminder_time,
                 "created_at": datetime.now().isoformat()
             }
             
@@ -359,8 +328,7 @@ class FamilyMealBot:
             await update.message.reply_text(
                 f"✅ *{context.user_data['inv_name']}* añadido\n\n"
                 f"📍 {context.user_data['inv_section']}\n"
-                f"📊 Stock: {context.user_data['inv_stock']}\n"
-                + (f"⏰ Recordatorio: {reminder_time}" if context.user_data['inv_section'] == "Congelador" else ""),
+                f"📊 Stock: {context.user_data['inv_stock']}",
                 parse_mode='Markdown'
             )
         except Exception as e:
@@ -538,8 +506,7 @@ def main():
         states={
             ADD_INVENTORY_SECTION: [CallbackQueryHandler(bot.add_inventory_section, pattern="^inv_section_")],
             ADD_INVENTORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.add_inventory_name)],
-            ADD_INVENTORY_STOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.add_inventory_stock)],
-            ADD_INVENTORY_REMINDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.add_inventory_reminder)]
+            ADD_INVENTORY_STOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.add_inventory_stock)]
         },
         fallbacks=[CommandHandler("cancel", bot.cancel)],
         allow_reentry=True
