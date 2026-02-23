@@ -1,6 +1,6 @@
 """
 FamilyMeal Bot - VERSIÓN COMPLETA
-Con inventario, recetas (COMPLETO), menú semanal, lista de compra y notificaciones
+Con inventario, recetas, MENÚ SEMANAL completo, lista de compra y notificaciones
 """
 
 import os
@@ -31,11 +31,30 @@ supabase: Client = create_client(SUPABASE_URL or "", SUPABASE_KEY or "")
  ADD_INVENTORY_SECTION, ADD_INVENTORY_NAME, ADD_INVENTORY_STOCK,
  CREATE_RECIPE_NAME, SELECT_INGREDIENT_SECTION, SELECT_INGREDIENT_PRODUCT, 
  ADD_INGREDIENT_QUANTITY, SET_DEFROST_TIME,
- SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_RECIPE) = range(13)
+ SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_OPTION, SELECT_MENU_RECIPE,
+ MENU_FREE_TEXT) = range(15)
 
 DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 MEALS = ['Comida', 'Cena']
 SECTIONS = ['Despensa', 'Frigo', 'Congelador']
+
+
+def get_week_dates():
+    """Obtener fechas de lunes a domingo de la semana actual"""
+    today = datetime.now().date()
+    # Obtener lunes de esta semana (weekday: 0=Lunes, 6=Domingo)
+    monday = today - timedelta(days=today.weekday())
+    week_dates = [monday + timedelta(days=i) for i in range(7)]
+    return week_dates
+
+
+def get_available_days():
+    """Obtener solo los días disponibles desde hoy hasta domingo"""
+    today = datetime.now().date()
+    week_dates = get_week_dates()
+    # Filtrar solo desde hoy en adelante
+    available = [(i, date) for i, date in enumerate(week_dates) if date >= today]
+    return available
 
 
 class FamilyMealBot:
@@ -433,7 +452,6 @@ class FamilyMealBot:
         query = update.callback_query
         await query.answer()
         
-        # Limpiar datos previos
         context.user_data['recipe_ingredients'] = []
         context.user_data['recipe_needs_defrost'] = False
         
@@ -471,11 +489,9 @@ class FamilyMealBot:
         section = query.data.replace("ing_sect_", "")
         context.user_data['current_ing_section'] = section
         
-        # Si es congelador, marcar que la receta necesita descongelar
         if section == "Congelador":
             context.user_data['recipe_needs_defrost'] = True
         
-        # Obtener productos de esa sección
         telegram_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
         first_name = update.effective_user.first_name
@@ -522,7 +538,6 @@ class FamilyMealBot:
         
         product_id = query.data.replace("ing_prod_", "")
         
-        # Obtener datos del producto
         product = supabase.table("inventory").select("*").eq("id", product_id).execute()
         if not product.data:
             await query.edit_message_text("❌ Producto no encontrado")
@@ -550,7 +565,6 @@ class FamilyMealBot:
             
             context.user_data['recipe_ingredients'].append(ingredient_data)
             
-            # Mostrar ingredientes actuales
             ingredients_text = "\n".join([
                 f"• {ing['name']} ({ing['quantity']} ud) - {ing['section']}"
                 for ing in context.user_data['recipe_ingredients']
@@ -617,7 +631,6 @@ class FamilyMealBot:
         """Capturar hora de recordatorio y guardar receta"""
         reminder_time = update.message.text.strip()
         
-        # Validar formato HH:MM
         try:
             time_parts = reminder_time.split(":")
             if len(time_parts) != 2:
@@ -643,7 +656,6 @@ class FamilyMealBot:
         family = await self.get_user_family(user['id'])
         
         try:
-            # Crear receta
             recipe_data = {
                 "family_id": family['id'],
                 "name": context.user_data['recipe_name'],
@@ -656,7 +668,6 @@ class FamilyMealBot:
             recipe_response = supabase.table("recipes").insert(recipe_data).execute()
             recipe_id = recipe_response.data[0]['id']
             
-            # Añadir ingredientes
             for ingredient in context.user_data['recipe_ingredients']:
                 ingredient_data = {
                     "recipe_id": recipe_id,
@@ -666,7 +677,6 @@ class FamilyMealBot:
                 }
                 supabase.table("recipe_ingredients").insert(ingredient_data).execute()
             
-            # Mostrar resumen
             ingredients_text = "\n".join([
                 f"• {ing['name']} ({ing['quantity']} ud)"
                 for ing in context.user_data['recipe_ingredients']
@@ -694,14 +704,386 @@ class FamilyMealBot:
             else:
                 await update.message.reply_text(error_msg)
     
-    # ========== MENÚ SEMANAL (placeholder) ==========
+    # ========== MENÚ SEMANAL ==========
     
     async def show_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Mostrar menú semanal"""
-        await update.message.reply_text(
-            "📅 *Menú Semanal*\n\n🚧 Próximamente podrás planificar comidas de la semana.",
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        if not family:
+            await update.message.reply_text("❌ No perteneces a ninguna familia")
+            return
+        
+        week_dates = get_week_dates()
+        today = datetime.now().date()
+        
+        text = "📅 *Menú Semanal*\n\n"
+        
+        # Mostrar cada día
+        for i, date in enumerate(week_dates):
+            day_name = DAYS[i]
+            is_today = (date == today)
+            day_marker = " ← Hoy" if is_today else ""
+            
+            text += f"\n*{day_name} {date.strftime('%d/%m')}*{day_marker}\n"
+            
+            if date < today:
+                text += "_Día pasado_\n"
+                continue
+            
+            # Obtener comidas del día
+            for meal_type in MEALS:
+                meal_plan = supabase.table("meal_plans")\
+                    .select("*, recipes(name, needs_defrost)")\
+                    .eq("family_id", family['id'])\
+                    .eq("date", str(date))\
+                    .eq("meal_type", meal_type)\
+                    .execute()
+                
+                meal_icon = "🍽️" if meal_type == "Comida" else "🌙"
+                
+                if meal_plan.data:
+                    plan = meal_plan.data[0]
+                    if plan.get('recipes'):
+                        recipe_name = plan['recipes']['name']
+                        defrost_icon = " 🧊" if plan['recipes'].get('needs_defrost') else ""
+                        cooked_icon = " ✅" if plan.get('is_cooked') else ""
+                        text += f"{meal_icon} {meal_type}: {recipe_name}{defrost_icon}{cooked_icon}\n"
+                    elif plan.get('meal_text'):
+                        text += f"{meal_icon} {meal_type}: {plan['meal_text']}\n"
+                else:
+                    text += f"{meal_icon} {meal_type}: -\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Añadir comida", callback_data="add_meal")],
+            [InlineKeyboardButton("🗑️ Limpiar semana", callback_data="clear_week")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def add_meal_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Iniciar añadir comida al menú"""
+        query = update.callback_query
+        await query.answer()
+        
+        available_days = get_available_days()
+        
+        if not available_days:
+            await query.edit_message_text("❌ No hay días disponibles esta semana")
+            return ConversationHandler.END
+        
+        keyboard = []
+        for day_idx, date in available_days:
+            day_name = DAYS[day_idx]
+            keyboard.append([InlineKeyboardButton(
+                f"{day_name} {date.strftime('%d/%m')}",
+                callback_data=f"menu_day_{day_idx}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📅 *Añadir comida*\n\n¿Qué día?",
+            reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+        return SELECT_MENU_DAY
+    
+    async def select_menu_day(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Seleccionar día"""
+        query = update.callback_query
+        await query.answer()
+        
+        day_idx = int(query.data.replace("menu_day_", ""))
+        context.user_data['menu_day_idx'] = day_idx
+        
+        week_dates = get_week_dates()
+        date = week_dates[day_idx]
+        context.user_data['menu_date'] = str(date)
+        
+        keyboard = [
+            [InlineKeyboardButton("🍽️ Comida", callback_data="menu_meal_Comida")],
+            [InlineKeyboardButton("🌙 Cena", callback_data="menu_meal_Cena")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        day_name = DAYS[day_idx]
+        await query.edit_message_text(
+            f"📅 *{day_name} {date.strftime('%d/%m')}*\n\n¿Comida o Cena?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return SELECT_MENU_MEAL
+    
+    async def select_menu_meal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Seleccionar comida o cena"""
+        query = update.callback_query
+        await query.answer()
+        
+        meal_type = query.data.replace("menu_meal_", "")
+        context.user_data['menu_meal_type'] = meal_type
+        
+        keyboard = [
+            [InlineKeyboardButton("📖 Elegir receta", callback_data="menu_opt_recipe")],
+            [InlineKeyboardButton("✏️ Texto libre", callback_data="menu_opt_text")],
+            [InlineKeyboardButton("❌ Eliminar", callback_data="menu_opt_delete")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"{meal_type}:\n\n¿Qué quieres hacer?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return SELECT_MENU_OPTION
+    
+    async def select_menu_option(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Seleccionar opción: receta, texto o eliminar"""
+        query = update.callback_query
+        await query.answer()
+        
+        option = query.data.replace("menu_opt_", "")
+        
+        if option == "delete":
+            await self.delete_meal_plan(update, context, query)
+            return ConversationHandler.END
+        elif option == "text":
+            await query.edit_message_text("✏️ *Texto libre*\n\n¿Qué vas a cocinar?", parse_mode='Markdown')
+            return MENU_FREE_TEXT
+        elif option == "recipe":
+            telegram_id = update.effective_user.id
+            username = update.effective_user.username or update.effective_user.first_name
+            first_name = update.effective_user.first_name
+            
+            user = await self.get_or_create_user(telegram_id, username, first_name)
+            family = await self.get_user_family(user['id'])
+            
+            recipes = supabase.table("recipes")\
+                .select("*")\
+                .eq("family_id", family['id'])\
+                .execute()
+            
+            if not recipes.data:
+                await query.edit_message_text("❌ No hay recetas. Crea una primero.")
+                return ConversationHandler.END
+            
+            keyboard = []
+            for recipe in recipes.data:
+                icon = "🧊" if recipe.get('needs_defrost') else "✅"
+                keyboard.append([InlineKeyboardButton(
+                    f"{icon} {recipe['name']}",
+                    callback_data=f"menu_recipe_{recipe['id']}"
+                )])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "📖 *Selecciona receta:*",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return SELECT_MENU_RECIPE
+    
+    async def save_menu_free_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Guardar texto libre en el menú"""
+        meal_text = update.message.text.strip()
+        
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        try:
+            # Verificar si ya existe
+            existing = supabase.table("meal_plans")\
+                .select("id")\
+                .eq("family_id", family['id'])\
+                .eq("date", context.user_data['menu_date'])\
+                .eq("meal_type", context.user_data['menu_meal_type'])\
+                .execute()
+            
+            if existing.data:
+                # Actualizar
+                supabase.table("meal_plans")\
+                    .update({
+                        "meal_text": meal_text,
+                        "recipe_id": None,
+                        "is_cooked": False
+                    })\
+                    .eq("id", existing.data[0]['id'])\
+                    .execute()
+            else:
+                # Crear
+                meal_plan_data = {
+                    "family_id": family['id'],
+                    "date": context.user_data['menu_date'],
+                    "meal_type": context.user_data['menu_meal_type'],
+                    "meal_text": meal_text,
+                    "created_by": user['id'],
+                    "created_at": datetime.now().isoformat()
+                }
+                supabase.table("meal_plans").insert(meal_plan_data).execute()
+            
+            await update.message.reply_text(
+                f"✅ *Añadido*\n\n"
+                f"{context.user_data['menu_meal_type']}: {meal_text}",
+                parse_mode='Markdown'
+            )
+            return ConversationHandler.END
+            
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await update.message.reply_text(f"❌ Error: {e}")
+            return ConversationHandler.END
+    
+    async def select_menu_recipe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Guardar receta seleccionada en el menú"""
+        query = update.callback_query
+        await query.answer()
+        
+        recipe_id = query.data.replace("menu_recipe_", "")
+        
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        try:
+            # Obtener receta
+            recipe = supabase.table("recipes").select("*").eq("id", recipe_id).execute()
+            if not recipe.data:
+                await query.edit_message_text("❌ Receta no encontrada")
+                return ConversationHandler.END
+            
+            recipe_data = recipe.data[0]
+            
+            # Verificar si ya existe
+            existing = supabase.table("meal_plans")\
+                .select("id")\
+                .eq("family_id", family['id'])\
+                .eq("date", context.user_data['menu_date'])\
+                .eq("meal_type", context.user_data['menu_meal_type'])\
+                .execute()
+            
+            if existing.data:
+                # Actualizar
+                supabase.table("meal_plans")\
+                    .update({
+                        "recipe_id": recipe_id,
+                        "meal_text": None,
+                        "is_cooked": False,
+                        "defrost_reminder_time": recipe_data.get('defrost_reminder_time') if recipe_data.get('needs_defrost') else None
+                    })\
+                    .eq("id", existing.data[0]['id'])\
+                    .execute()
+            else:
+                # Crear
+                meal_plan_data = {
+                    "family_id": family['id'],
+                    "date": context.user_data['menu_date'],
+                    "meal_type": context.user_data['menu_meal_type'],
+                    "recipe_id": recipe_id,
+                    "created_by": user['id'],
+                    "defrost_reminder_time": recipe_data.get('defrost_reminder_time') if recipe_data.get('needs_defrost') else None,
+                    "created_at": datetime.now().isoformat()
+                }
+                supabase.table("meal_plans").insert(meal_plan_data).execute()
+            
+            defrost_info = ""
+            if recipe_data.get('needs_defrost'):
+                defrost_info = f"\n\n🔔 Notificación programada: {recipe_data.get('defrost_reminder_time', '22:00')}"
+            
+            await query.edit_message_text(
+                f"✅ *Añadido*\n\n"
+                f"{context.user_data['menu_meal_type']}: {recipe_data['name']}"
+                f"{defrost_info}",
+                parse_mode='Markdown'
+            )
+            return ConversationHandler.END
+            
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await query.edit_message_text(f"❌ Error: {e}")
+            return ConversationHandler.END
+    
+    async def delete_meal_plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query):
+        """Eliminar comida del menú"""
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        try:
+            supabase.table("meal_plans")\
+                .delete()\
+                .eq("family_id", family['id'])\
+                .eq("date", context.user_data['menu_date'])\
+                .eq("meal_type", context.user_data['menu_meal_type'])\
+                .execute()
+            
+            await query.edit_message_text(f"✅ Eliminado")
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await query.edit_message_text(f"❌ Error: {e}")
+    
+    async def clear_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Limpiar todo el menú de la semana"""
+        query = update.callback_query
+        await query.answer()
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Sí, borrar todo", callback_data="confirm_clear")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="cancel_clear")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🗑️ *¿Borrar todo el menú?*\n\n"
+            "Esto eliminará todas las comidas planificadas.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    async def confirm_clear_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Confirmar limpieza de semana"""
+        query = update.callback_query
+        await query.answer()
+        
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        try:
+            week_dates = get_week_dates()
+            monday = str(week_dates[0])
+            sunday = str(week_dates[6])
+            
+            supabase.table("meal_plans")\
+                .delete()\
+                .eq("family_id", family['id'])\
+                .gte("date", monday)\
+                .lte("date", sunday)\
+                .execute()
+            
+            await query.edit_message_text("✅ *Menú limpiado*", parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await query.edit_message_text(f"❌ Error: {e}")
     
     # ========== MI FAMILIA ==========
     
@@ -820,6 +1202,26 @@ def main():
     )
     application.add_handler(recipe_conv)
     
+    # Menú semanal
+    menu_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(bot.add_meal_start, pattern="^add_meal$")],
+        states={
+            SELECT_MENU_DAY: [CallbackQueryHandler(bot.select_menu_day, pattern="^menu_day_")],
+            SELECT_MENU_MEAL: [CallbackQueryHandler(bot.select_menu_meal, pattern="^menu_meal_")],
+            SELECT_MENU_OPTION: [CallbackQueryHandler(bot.select_menu_option, pattern="^menu_opt_")],
+            SELECT_MENU_RECIPE: [CallbackQueryHandler(bot.select_menu_recipe, pattern="^menu_recipe_")],
+            MENU_FREE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.save_menu_free_text)]
+        },
+        fallbacks=[CommandHandler("cancel", bot.cancel)],
+        allow_reentry=True
+    )
+    application.add_handler(menu_conv)
+    
+    # Limpiar semana
+    application.add_handler(CallbackQueryHandler(bot.clear_week, pattern="^clear_week$"))
+    application.add_handler(CallbackQueryHandler(bot.confirm_clear_week, pattern="^confirm_clear$"))
+    application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("Cancelado"), pattern="^cancel_clear$"))
+    
     # Marcar como comprado
     application.add_handler(CallbackQueryHandler(bot.mark_as_bought, pattern="^buy_"))
     
@@ -829,7 +1231,7 @@ def main():
         bot.menu_button_handler
     ))
     
-    logger.info("🤖 Bot iniciado con recetas completas")
+    logger.info("🤖 Bot iniciado - MENÚ SEMANAL COMPLETO")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
