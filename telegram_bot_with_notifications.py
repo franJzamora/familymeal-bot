@@ -31,8 +31,7 @@ supabase: Client = create_client(SUPABASE_URL or "", SUPABASE_KEY or "")
  ADD_INVENTORY_SECTION, ADD_INVENTORY_NAME, ADD_INVENTORY_STOCK,
  CREATE_RECIPE_NAME, SELECT_INGREDIENT_SECTION, SELECT_INGREDIENT_PRODUCT, 
  ADD_INGREDIENT_QUANTITY, SET_DEFROST_TIME,
- SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_OPTION, SELECT_MENU_RECIPE,
- MENU_FREE_TEXT) = range(15)
+ SELECT_MENU_DAY, SELECT_MENU_MEAL, SELECT_MENU_RECIPE) = range(13)
 
 DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 MEALS = ['Comida', 'Cena']
@@ -822,77 +821,12 @@ class FamilyMealBot:
         return SELECT_MENU_MEAL
     
     async def select_menu_meal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Seleccionar comida o cena"""
+        """Seleccionar comida o cena - directamente mostrar recetas"""
         query = update.callback_query
         await query.answer()
         
         meal_type = query.data.replace("menu_meal_", "")
         context.user_data['menu_meal_type'] = meal_type
-        
-        keyboard = [
-            [InlineKeyboardButton("📖 Elegir receta", callback_data="menu_opt_recipe")],
-            [InlineKeyboardButton("✏️ Texto libre", callback_data="menu_opt_text")],
-            [InlineKeyboardButton("❌ Eliminar", callback_data="menu_opt_delete")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"{meal_type}:\n\n¿Qué quieres hacer?",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-        return SELECT_MENU_OPTION
-    
-    async def select_menu_option(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Seleccionar opción: receta, texto o eliminar"""
-        query = update.callback_query
-        await query.answer()
-        
-        option = query.data.replace("menu_opt_", "")
-        
-        if option == "delete":
-            await self.delete_meal_plan(update, context, query)
-            return ConversationHandler.END
-        elif option == "text":
-            await query.edit_message_text("✏️ *Texto libre*\n\n¿Qué vas a cocinar?", parse_mode='Markdown')
-            return MENU_FREE_TEXT
-        elif option == "recipe":
-            telegram_id = update.effective_user.id
-            username = update.effective_user.username or update.effective_user.first_name
-            first_name = update.effective_user.first_name
-            
-            user = await self.get_or_create_user(telegram_id, username, first_name)
-            family = await self.get_user_family(user['id'])
-            
-            recipes = supabase.table("recipes")\
-                .select("*")\
-                .eq("family_id", family['id'])\
-                .execute()
-            
-            if not recipes.data:
-                await query.edit_message_text("❌ No hay recetas. Crea una primero.")
-                return ConversationHandler.END
-            
-            keyboard = []
-            for recipe in recipes.data:
-                icon = "🧊" if recipe.get('needs_defrost') else "✅"
-                keyboard.append([InlineKeyboardButton(
-                    f"{icon} {recipe['name']}",
-                    callback_data=f"menu_recipe_{recipe['id']}"
-                )])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                "📖 *Selecciona receta:*",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return SELECT_MENU_RECIPE
-    
-    async def save_menu_free_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Guardar texto libre en el menú"""
-        meal_text = update.message.text.strip()
         
         telegram_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
@@ -901,53 +835,47 @@ class FamilyMealBot:
         user = await self.get_or_create_user(telegram_id, username, first_name)
         family = await self.get_user_family(user['id'])
         
-        try:
-            # Verificar si ya existe
-            existing = supabase.table("meal_plans")\
-                .select("id")\
-                .eq("family_id", family['id'])\
-                .eq("date", context.user_data['menu_date'])\
-                .eq("meal_type", context.user_data['menu_meal_type'])\
-                .execute()
-            
-            if existing.data:
-                # Actualizar
-                supabase.table("meal_plans")\
-                    .update({
-                        "meal_text": meal_text,
-                        "recipe_id": None,
-                        "is_cooked": False
-                    })\
-                    .eq("id", existing.data[0]['id'])\
-                    .execute()
-            else:
-                # Crear
-                meal_plan_data = {
-                    "family_id": family['id'],
-                    "date": context.user_data['menu_date'],
-                    "meal_type": context.user_data['menu_meal_type'],
-                    "meal_text": meal_text,
-                    "created_by": user['id'],
-                    "created_at": datetime.now().isoformat()
-                }
-                supabase.table("meal_plans").insert(meal_plan_data).execute()
-            
-            await update.message.reply_text(
-                f"✅ *Añadido*\n\n"
-                f"{context.user_data['menu_meal_type']}: {meal_text}",
+        recipes = supabase.table("recipes")\
+            .select("*")\
+            .eq("family_id", family['id'])\
+            .execute()
+        
+        if not recipes.data:
+            await query.edit_message_text(
+                "❌ No hay recetas.\n\nCrea una primero en 📖 Recetas",
                 parse_mode='Markdown'
             )
             return ConversationHandler.END
-            
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            await update.message.reply_text(f"❌ Error: {e}")
-            return ConversationHandler.END
+        
+        keyboard = []
+        for recipe in recipes.data:
+            icon = "🧊" if recipe.get('needs_defrost') else "✅"
+            keyboard.append([InlineKeyboardButton(
+                f"{icon} {recipe['name']}",
+                callback_data=f"menu_recipe_{recipe['id']}"
+            )])
+        
+        # Añadir opción eliminar
+        keyboard.append([InlineKeyboardButton("❌ Eliminar comida", callback_data="menu_opt_delete")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📖 *{meal_type}*\n\nSelecciona receta:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return SELECT_MENU_RECIPE
     
     async def select_menu_recipe(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Guardar receta seleccionada en el menú"""
+        """Guardar receta seleccionada en el menú O eliminar"""
         query = update.callback_query
         await query.answer()
+        
+        # Verificar si es opción de eliminar
+        if query.data == "menu_opt_delete":
+            await self.delete_meal_plan(update, context, query)
+            return ConversationHandler.END
         
         recipe_id = query.data.replace("menu_recipe_", "")
         
@@ -1208,9 +1136,10 @@ def main():
         states={
             SELECT_MENU_DAY: [CallbackQueryHandler(bot.select_menu_day, pattern="^menu_day_")],
             SELECT_MENU_MEAL: [CallbackQueryHandler(bot.select_menu_meal, pattern="^menu_meal_")],
-            SELECT_MENU_OPTION: [CallbackQueryHandler(bot.select_menu_option, pattern="^menu_opt_")],
-            SELECT_MENU_RECIPE: [CallbackQueryHandler(bot.select_menu_recipe, pattern="^menu_recipe_")],
-            MENU_FREE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.save_menu_free_text)]
+            SELECT_MENU_RECIPE: [
+                CallbackQueryHandler(bot.select_menu_recipe, pattern="^menu_recipe_"),
+                CallbackQueryHandler(bot.select_menu_recipe, pattern="^menu_opt_delete$")
+            ]
         },
         fallbacks=[CommandHandler("cancel", bot.cancel)],
         allow_reentry=True
