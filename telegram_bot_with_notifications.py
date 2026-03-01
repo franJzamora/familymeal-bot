@@ -630,7 +630,7 @@ class FamilyMealBot:
             await query.edit_message_text(
                 "🧊 *Esta receta necesita descongelar*\n\n"
                 "¿A qué hora quieres el recordatorio?\n"
-                "(Formato: HH:MM, ej: 22:00)",
+                "(Formato: HH:MM, ej: 22:00 o 21:30)",
                 parse_mode='Markdown'
             )
             return SET_DEFROST_TIME
@@ -648,10 +648,22 @@ class FamilyMealBot:
                 raise ValueError
             hour = int(time_parts[0])
             minute = int(time_parts[1])
-            if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            if hour < 0 or hour > 23:
                 raise ValueError
+            if minute not in [0, 30]:
+                await update.message.reply_text(
+                    "❌ Los minutos deben ser :00 o :30\n"
+                    "Ej: 22:00, 21:30, 20:00\n\n"
+                    "Intenta de nuevo:"
+                )
+                return SET_DEFROST_TIME
         except:
-            await update.message.reply_text("❌ Formato incorrecto. Usa HH:MM (ej: 22:00):")
+            await update.message.reply_text(
+                "❌ Formato incorrecto.\n"
+                "Usa HH:MM con minutos :00 o :30\n"
+                "Ej: 22:00, 21:30\n\n"
+                "Intenta de nuevo:"
+            )
             return SET_DEFROST_TIME
         
         await self.save_recipe(update, context, None, reminder_time)
@@ -667,6 +679,10 @@ class FamilyMealBot:
         family = await self.get_user_family(user['id'])
         
         try:
+            # Asegurar formato HH:MM:00 para la BD
+            if len(reminder_time.split(':')) == 2:
+                reminder_time = f"{reminder_time}:00"
+            
             recipe_data = {
                 "family_id": family['id'],
                 "name": context.user_data['recipe_name'],
@@ -1131,17 +1147,17 @@ class NotificationScheduler:
     
     def start(self):
         """Iniciar el scheduler"""
-        # Ejecutar check cada hora (para capturar todas las horas personalizadas)
+        # Ejecutar cada 30 minutos para permitir recordatorios a y media
         self.scheduler.add_job(
             self.check_and_send_reminders,
-            trigger=CronTrigger(minute=0),  # Cada hora en punto
+            trigger=CronTrigger(minute='0,30'),  # Ejecutar a las :00 y :30
             id='defrost_reminders',
             replace_existing=True
         )
         
         self.scheduler.start()
         logger.info("✅ Scheduler de notificaciones ACTIVADO")
-        logger.info("   - Revisa cada hora si hay recordatorios pendientes")
+        logger.info("   - Revisa cada 30 minutos si hay recordatorios pendientes")
     
     async def check_and_send_reminders(self):
         """Revisar y enviar recordatorios de descongelar"""
@@ -1150,7 +1166,12 @@ class NotificationScheduler:
         try:
             # Hora actual
             now = datetime.now()
-            current_time = now.time().strftime("%H:00:00")  # Redondear a hora en punto
+            # Redondear a :00 o :30
+            if now.minute < 30:
+                current_time = now.strftime("%H:00:00")
+            else:
+                current_time = now.strftime("%H:30:00")
+            
             tomorrow = (now + timedelta(days=1)).date()
             
             # Buscar meal_plans para mañana con recordatorio a esta hora
