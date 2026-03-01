@@ -38,11 +38,22 @@ MEALS = ['Comida', 'Cena']
 SECTIONS = ['Despensa', 'Frigo', 'Congelador']
 
 
-def get_week_dates():
-    """Obtener fechas de lunes a domingo de la semana actual"""
-    today = datetime.now().date()
-    # Obtener lunes de esta semana (weekday: 0=Lunes, 6=Domingo)
-    monday = today - timedelta(days=today.weekday())
+def get_week_to_display():
+    """
+    Determinar qué semana mostrar:
+    - Si es Domingo después de las 12:00 → Semana siguiente
+    - Resto de casos → Semana actual
+    """
+    now = datetime.now()
+    
+    # Si es Domingo (weekday=6) y son las 12:00 o más tarde
+    if now.weekday() == 6 and now.hour >= 12:
+        # Mostrar semana siguiente (desde el Lunes)
+        monday = now.date() + timedelta(days=1)
+    else:
+        # Mostrar semana actual
+        monday = now.date() - timedelta(days=now.weekday())
+    
     week_dates = [monday + timedelta(days=i) for i in range(7)]
     return week_dates
 
@@ -51,7 +62,7 @@ def get_available_days():
     """Obtener solo los días disponibles desde MAÑANA hasta domingo"""
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
-    week_dates = get_week_dates()
+    week_dates = get_week_to_display()
     # Filtrar desde mañana en adelante
     available = [(i, date) for i, date in enumerate(week_dates) if date >= tomorrow]
     return available
@@ -719,7 +730,7 @@ class FamilyMealBot:
             await update.message.reply_text("❌ No perteneces a ninguna familia")
             return
         
-        week_dates = get_week_dates()
+        week_dates = get_week_to_display()
         today = datetime.now().date()
         
         text = "📅 *Menú Semanal*\n\n"
@@ -803,7 +814,7 @@ class FamilyMealBot:
         day_idx = int(query.data.replace("menu_day_", ""))
         context.user_data['menu_day_idx'] = day_idx
         
-        week_dates = get_week_dates()
+        week_dates = get_week_to_display()
         date = week_dates[day_idx]
         context.user_data['menu_date'] = str(date)
         
@@ -968,25 +979,27 @@ class FamilyMealBot:
             await query.edit_message_text(f"❌ Error: {e}")
     
     async def clear_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Limpiar todo el menú de la semana"""
+        """Mostrar opciones para limpiar semana"""
         query = update.callback_query
         await query.answer()
         
         keyboard = [
-            [InlineKeyboardButton("✅ Sí, borrar todo", callback_data="confirm_clear")],
-            [InlineKeyboardButton("❌ Cancelar", callback_data="cancel_clear")]
+            [InlineKeyboardButton("✅ Marcar todo como cocinado", callback_data="clear_mark_cooked")],
+            [InlineKeyboardButton("🗑️ Borrar sin marcar", callback_data="clear_delete")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="clear_cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "🗑️ *¿Borrar todo el menú?*\n\n"
-            "Esto eliminará todas las comidas planificadas.",
+            "🗑️ *¿Qué quieres hacer con el menú?*\n\n"
+            "✅ *Marcar cocinado:* Guarda que cocinaste todo (sin borrar el menú)\n"
+            "🗑️ *Borrar:* Elimina todo directamente",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
     
-    async def confirm_clear_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Confirmar limpieza de semana"""
+    async def clear_mark_cooked(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Marcar todo el menú como cocinado"""
         query = update.callback_query
         await query.answer()
         
@@ -998,18 +1011,55 @@ class FamilyMealBot:
         family = await self.get_user_family(user['id'])
         
         try:
-            week_dates = get_week_dates()
+            week_dates = get_week_to_display()
             monday = str(week_dates[0])
             sunday = str(week_dates[6])
             
-            supabase.table("meal_plans")\
-                .delete()\
-                .eq("family_id", family['id'])\
-                .gte("date", monday)\
-                .lte("date", sunday)\
+            # Marcar todo como cocinado
+            supabase.table("meal_plans") \
+                .update({
+                    "is_cooked": True,
+                    "cooked_at": datetime.now().isoformat()
+                }) \
+                .eq("family_id", family['id']) \
+                .gte("date", monday) \
+                .lte("date", sunday) \
                 .execute()
             
-            await query.edit_message_text("✅ *Menú limpiado*", parse_mode='Markdown')
+            await query.edit_message_text(
+                "✅ *Todo marcado como cocinado*\n\n"
+                "El menú sigue visible. Usa 'Borrar' si quieres limpiarlo.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await query.edit_message_text(f"❌ Error: {e}")
+    
+    async def clear_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Borrar todo el menú sin marcar"""
+        query = update.callback_query
+        await query.answer()
+        
+        telegram_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        first_name = update.effective_user.first_name
+        
+        user = await self.get_or_create_user(telegram_id, username, first_name)
+        family = await self.get_user_family(user['id'])
+        
+        try:
+            week_dates = get_week_to_display()
+            monday = str(week_dates[0])
+            sunday = str(week_dates[6])
+            
+            supabase.table("meal_plans") \
+                .delete() \
+                .eq("family_id", family['id']) \
+                .gte("date", monday) \
+                .lte("date", sunday) \
+                .execute()
+            
+            await query.edit_message_text("✅ *Menú borrado*", parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error: {e}")
             await query.edit_message_text(f"❌ Error: {e}")
@@ -1288,8 +1338,9 @@ def main():
     
     # Limpiar semana
     application.add_handler(CallbackQueryHandler(bot.clear_week, pattern="^clear_week$"))
-    application.add_handler(CallbackQueryHandler(bot.confirm_clear_week, pattern="^confirm_clear$"))
-    application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("Cancelado"), pattern="^cancel_clear$"))
+    application.add_handler(CallbackQueryHandler(bot.clear_mark_cooked, pattern="^clear_mark_cooked$"))
+    application.add_handler(CallbackQueryHandler(bot.clear_delete, pattern="^clear_delete$"))
+    application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("Cancelado"), pattern="^clear_cancel$"))
     
     # Marcar como comprado
     application.add_handler(CallbackQueryHandler(bot.mark_as_bought, pattern="^buy_"))
